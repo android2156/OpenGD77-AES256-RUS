@@ -1,17 +1,6 @@
 /*
- * menuMessages.c — on-radio encrypted DMR SMS UX (Inbox / Sent / New Message).
- *
- * Modelled on menuAESKeys.c. A small screen state-machine:
- *   HOME      : Inbox (n) / Sent (n) / New Message
- *   LIST      : the messages of a folder + a "[Delete all]" row
- *   READ      : full text of one message (SK2+GREEN deletes it)
- *   COMPOSE   : keypad text entry (multi-tap, like the contact-name editor)
- *   RECIPIENT : destination DMR ID / talkgroup + Group/Private + send
- *
- * Sending and the store live in functions/dmr_sms.c (the on-air-validated AES-256-ECB
- * scheme a stock TYT decrypts). Compiles to nothing unless -DENABLE_DMR_DATA.
- *
- * LEGAL: encrypted traffic is illegal on amateur bands in most jurisdictions. PMR/commercial.
+ * menuMessages.c — on-radio encrypted DMR SMS UX (Inbox / Sent / New Message)
+ * with Russian/English UI localisation and Russian/English multi-tap input (# toggle).
  */
 #include "user_interface/uiGlobals.h"
 #include "user_interface/menuSystem.h"
@@ -26,6 +15,23 @@
 
 #if defined(ENABLE_DMR_DATA)
 
+extern volatile bool keypadAlphaRussian;
+extern void keyboardResetAlpha(void);
+#if ! defined(LANGUAGE_BUILD_JAPANESE)
+extern const stringsTable_t russianLanguage;
+#endif
+
+static inline bool isRussianUI(void)
+{
+#if ! defined(LANGUAGE_BUILD_JAPANESE)
+	return (currentLanguage == &russianLanguage);
+#else
+	return false;
+#endif
+}
+
+#define TR(en, ru) (isRussianUI() ? (ru) : (en))
+
 enum { MSG_HOME = 0, MSG_LIST, MSG_READ, MSG_COMPOSE, MSG_RECIPIENT, MSG_RESULT };
 
 static struct
@@ -35,7 +41,7 @@ static struct
 	int16_t  readIdx;       // message being read
 	char     compose[DMR_SMS_TEXT_MAX + 1];
 	int16_t  composePos;
-	char     rcpt[10];      // numeric recipient entry
+	char     rcpt[10];      // numeric recipient entry (up to 8 digits for 24-bit DMR ID)
 	int16_t  rcptPos;
 	uint8_t  rcptGroup;     // 1 = talkgroup, 0 = private call
 	int8_t   presetIdx;     // last quick-text preset cycled in (-1 = none)
@@ -58,6 +64,8 @@ static void recipientEvent(uiEvent_t *ev);
 static void gotoHome(void)
 {
 	keypadAlphaEnable = false;
+	keypadAlphaRussian = false;
+	keyboardResetAlpha();
 	s_msg.view = MSG_HOME;
 	menuDataGlobal.currentItemIndex = 0;
 	menuDataGlobal.numItems = 3;
@@ -106,7 +114,7 @@ static void homeUpdate(void)
 {
 	char buf[24];
 	displayClearBuf();
-	menuDisplayTitle("Messages");
+	menuDisplayTitle((char *)currentLanguage->messages);
 
 	for (int i = MENU_START_ITERATION_VALUE; i <= MENU_END_ITERATION_VALUE; i++)
 	{
@@ -116,15 +124,13 @@ static void homeUpdate(void)
 
 		switch (mNum)
 		{
-			case 0:  snprintf(buf, sizeof buf, "Inbox (%d)", dmrSmsCount(0)); break;
-			case 1:  snprintf(buf, sizeof buf, "Sent (%d)",  dmrSmsCount(1)); break;
-			default: snprintf(buf, sizeof buf, "New Message");                break;
+			case 0:  snprintf(buf, sizeof buf, TR("Inbox (%d)", "\302\365\356\344\377\371\350\345 (%d)"), dmrSmsCount(0)); break;
+			case 1:  snprintf(buf, sizeof buf, TR("Sent (%d)",  "\316\362\357\360\340\342\353. (%d)"), dmrSmsCount(1)); break;
+			default: snprintf(buf, sizeof buf, "%s", TR("New Message", "\315\356\342\356\345 \361\356\356\341\371."));           break;
 		}
 		menuDisplayEntry(i, mNum, buf, 0, THEME_ITEM_FG_MENU_ITEM, THEME_ITEM_FG_OPTIONS_VALUE, THEME_ITEM_BG);
 	}
 
-	// RX diagnostic (bench bring-up). d=all data-sync bursts the chip delivered;
-	// h/b = data-header / rate-1/2 with CRC ok!bad; p=PDUs; m=decoded messages.
 	{
 		uint32_t d[7];
 		char l1[26], l2[26];
@@ -140,9 +146,6 @@ static void homeUpdate(void)
 	displayRender();
 }
 
-/* Show a folder's list with the cursor on row `cursor` (clamped to the list, which may have
- * just shrunk by a delete). Coming back from a read message, that is the message's row, so
- * the cursor does not jump back to the newest message after each one read. */
 static void openFolderAt(int folder, int cursor)
 {
 	s_msg.folder = (uint8_t)folder;
@@ -165,11 +168,12 @@ static void startCompose(void)
 	s_msg.composePos = 0;
 	s_msg.presetIdx = -1;
 	s_msg.view = MSG_COMPOSE;
+	keypadAlphaRussian = true;   // Default to Russian [РУС] when opening New Message
+	keyboardResetAlpha();
 	keypadAlphaEnable = true;
 	composeUpdate();
 }
 
-/* Cycle the next non-empty quick-text preset into the compose buffer. */
 static void cyclePreset(void)
 {
 	int total = dmrSmsPresetCount();
@@ -181,10 +185,12 @@ static void cyclePreset(void)
 		if (p != NULL)
 		{
 			int cap = dmrSmsMaxLen();
+			memset(s_msg.compose, 0, sizeof s_msg.compose);
 			strncpy(s_msg.compose, p, cap);
 			s_msg.compose[cap] = 0;
 			s_msg.composePos = (int16_t)strlen(s_msg.compose);
-			if (s_msg.composePos > cap - 1) { s_msg.composePos = cap - 1; }
+			if (s_msg.composePos > cap) { s_msg.composePos = cap; }
+			keyboardResetAlpha();
 			composeUpdate();
 			return;
 		}
@@ -207,7 +213,11 @@ static void homeEvent(uiEvent_t *ev, menuStatus_t *ec)
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
-		menuSystemPopPreviousMenu(); return;
+		keypadAlphaEnable = false;
+		keypadAlphaRussian = false;
+		keyboardResetAlpha();
+		menuSystemPopPreviousMenu();
+		return;
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
@@ -227,12 +237,12 @@ static void listUpdate(void)
 	char buf[DMR_SMS_TEXT_MAX + 24];
 	int count = dmrSmsCount(s_msg.folder);
 	displayClearBuf();
-	menuDisplayTitle(s_msg.folder ? "Sent" : "Inbox");
+	menuDisplayTitle(s_msg.folder ? (char *)TR("Sent", "\316\362\357\360\340\342\353\345\355\355\373\345") : (char *)TR("Inbox", "\302\365\356\344\377\371\350\345"));
 
 	if (count == 0)
 	{
-		displayPrintCentered(56, "(empty)", FONT_SIZE_3);
-		displayPrintCentered(112, "RED:back", FONT_SIZE_1);
+		displayPrintCentered(56, (char *)TR("(empty)", "(\357\363\361\362\356)"), FONT_SIZE_3);
+		displayPrintCentered(112, (char *)TR("RED:back", "\312\320\300\321\315:\355\340\347\340\344"), FONT_SIZE_1);
 		displayRender();
 		return;
 	}
@@ -245,7 +255,7 @@ static void listUpdate(void)
 
 		if (mNum == count)
 		{
-			snprintf(buf, sizeof buf, "[Delete all]");
+			snprintf(buf, sizeof buf, "%s", TR("[Delete all]", "[\323\344\340\353\350\362\374 \342\361\270]"));
 		}
 		else
 		{
@@ -282,10 +292,9 @@ static void listEvent(uiEvent_t *ev)
 
 	int idx = menuDataGlobal.currentItemIndex;
 
-	// SK2+GREEN deletes the selected message (deliberate combo).
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN) && BUTTONCHECK_DOWN(ev, BUTTON_SK2))
 	{
-		if (idx == count) { dmrSmsDeleteAll(s_msg.folder); }   // delete-all row + SK2
+		if (idx == count) { dmrSmsDeleteAll(s_msg.folder); }
 		else              { dmrSmsDelete(s_msg.folder, idx); }
 		int newCount = dmrSmsCount(s_msg.folder);
 		menuDataGlobal.numItems = newCount + 1;
@@ -298,7 +307,7 @@ static void listEvent(uiEvent_t *ev)
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
-		if (idx == count) { return; }   // need SK2 to confirm delete-all
+		if (idx == count) { return; }
 		s_msg.readIdx = (int16_t)idx;
 		dmrSmsMarkRead(s_msg.folder, idx);
 		s_msg.view = MSG_READ;
@@ -312,31 +321,33 @@ static void readUpdate(void)
 {
 	const dmrSmsMessage_t *m = dmrSmsGet(s_msg.folder, s_msg.readIdx);
 	displayClearBuf();
-	menuDisplayTitle(s_msg.folder ? "Sent" : "Inbox");
+	menuDisplayTitle(s_msg.folder ? (char *)TR("Sent", "\316\362\357\360\340\342\353\345\355\355\373\345") : (char *)TR("Inbox", "\302\365\356\344\377\371\350\345"));
 
 	if (m == NULL) { displayRender(); return; }
 
 	char hdr[24];
-	snprintf(hdr, sizeof hdr, "%s %lu", (m->flags & DMR_SMS_FLAG_OUTGOING) ? "To" : "From",
+	snprintf(hdr, sizeof hdr, "%s %lu",
+			(m->flags & DMR_SMS_FLAG_OUTGOING) ? TR("To", "\312\356\354\363:") : TR("From", "\316\362:"),
 			(unsigned long)m->peerId);
 	displayPrintAt(2, 16, hdr, FONT_SIZE_1);
 
-	// word-free char wrap into ~21-char lines
+	// 19 chars per line at FONT_SIZE_2 (8px width: 2 + 19*8 = 154 <= 160px, zero right-edge clipping!)
+	// 8 lines at 10px line height = 152 chars capacity (fits full 144-char SMS)
 	char txt[DMR_SMS_TEXT_MAX + 1];
 	int n = (m->textLen < (int)sizeof txt - 1) ? m->textLen : (int)sizeof txt - 1;
 	memcpy(txt, m->text, n); txt[n] = 0;
 
-	const int perLine = 21;
+	const int perLine = 19;
 	char line[perLine + 1];
-	int y = 30;
-	for (int i = 0; i < n && y < 104; i += perLine, y += 12)
+	int y = 26;
+	for (int i = 0; i < n && y < 106; i += perLine, y += 10)
 	{
 		int len = ((n - i) < perLine) ? (n - i) : perLine;
 		memcpy(line, txt + i, len); line[len] = 0;
 		displayPrintAt(2, y, line, FONT_SIZE_2);
 	}
 
-	displayPrintCentered(112, "SK2+GRN:del RED:back", FONT_SIZE_1);
+	displayPrintCentered(114, (char *)TR("SK2+GRN:del RED:back", "SK2+\307\305\313:\363\344\340\353 \312\320\300\321\315:\355\340\347\340\344"), FONT_SIZE_1);
 	displayRender();
 }
 
@@ -347,12 +358,12 @@ static void readEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN) && BUTTONCHECK_DOWN(ev, BUTTON_SK2))
 	{
 		dmrSmsDelete(s_msg.folder, s_msg.readIdx);
-		openFolderAt(s_msg.folder, s_msg.readIdx);   // the row that took the deleted message's place
+		openFolderAt(s_msg.folder, s_msg.readIdx);
 		return;
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED) || KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
-		openFolderAt(s_msg.folder, s_msg.readIdx);   // back on the message just read
+		openFolderAt(s_msg.folder, s_msg.readIdx);
 		return;
 	}
 }
@@ -361,32 +372,40 @@ static void readEvent(uiEvent_t *ev)
 static void composeUpdate(void)
 {
 	displayClearBuf();
-	menuDisplayTitle("New Message");
+	menuDisplayTitle((char *)TR("New Message", "\315\356\342\356\345 \361\356\356\341\371."));
 
-	// show the text wrapped
-	const int perLine = 21;
+	// 19 chars per line (FONT_SIZE_2, 8px wide -> 154px <= 160px), 7 visible rows (y=20..80),
+	// auto-scrolls by 1 row when n > 7*19 so all 144 chars are visible while typing.
+	const int perLine = 19;
+	const int maxVisibleRows = 7;
 	int n = (int)strlen(s_msg.compose);
 	char line[perLine + 1];
-	int y = 22;
+	int y = 20;
 	if (n == 0)
 	{
 		displayPrintAt(2, y, "_", FONT_SIZE_2);
 	}
-	for (int i = 0; i < n && y < 92; i += perLine, y += 14)
+	int startOff = (n > (perLine * maxVisibleRows)) ? perLine : 0;
+	for (int i = startOff; i < n && y < 90; i += perLine, y += 10)
 	{
 		int len = ((n - i) < perLine) ? (n - i) : perLine;
 		memcpy(line, s_msg.compose + i, len); line[len] = 0;
 		displayPrintAt(2, y, line, FONT_SIZE_2);
 	}
 
-	char cnt[20];
-	snprintf(cnt, sizeof cnt, "%d/%d chars", n, dmrSmsMaxLen());
-	displayPrintCentered(96, cnt, FONT_SIZE_1);
+	char cnt[28];
+	const char *langTag = keypadAlphaRussian ? "[\320\323\321]" : "[ENG]";
+	snprintf(cnt, sizeof cnt, TR("%s %d/%d #:lang", "%s %d/%d #:\377\347"), langTag, n, dmrSmsMaxLen());
+	displayPrintCentered(94, cnt, FONT_SIZE_1);
 	if (dmrSmsPresetCount() > 0)
 	{
-		displayPrintCentered(104, "U:preset  L:del", FONT_SIZE_1);
+		displayPrintCentered(104, (char *)TR("U:preset  L/D:del", "\302\302\305\320\325:\370\340\341\353 \302\313\305\302\316:\363\344\340\353"), FONT_SIZE_1);
 	}
-	displayPrintCentered(116, "GRN:to  RED:cancel", FONT_SIZE_1);
+	else
+	{
+		displayPrintCentered(104, (char *)TR("L/D:del  #:RUS/ENG", "\302\313\305\302\316/\302\315\310\307:\363\344\340\353 #:\377\347\373\352"), FONT_SIZE_1);
+	}
+	displayPrintCentered(116, (char *)TR("GRN:to  RED:cancel", "\307\305\313:\352\356\354\363  \312\320\300\321\315:\356\362\354\345\355\340"), FONT_SIZE_1);
 	displayRender();
 }
 
@@ -399,12 +418,12 @@ static void prefillRecipient(void)
 	uint32_t id;
 	if (defDst != 0)
 	{
-		id = defDst;                 // CHIRP-configured default recipient
+		id = defDst & 0x00FFFFFFu;
 		s_msg.rcptGroup = defGroup ? 1 : 0;
 	}
 	else
 	{
-		id = trxTalkGroupOrPcId & 0x00FFFFFF;   // fall back to the current channel
+		id = trxTalkGroupOrPcId & 0x00FFFFFFu;
 		s_msg.rcptGroup = ((trxTalkGroupOrPcId >> 24) == PC_CALL_FLAG) ? 0 : 1;
 	}
 	snprintf(s_msg.rcpt, sizeof s_msg.rcpt, "%lu", (unsigned long)id);
@@ -415,6 +434,30 @@ static void composeEvent(uiEvent_t *ev)
 {
 	if ((ev->events & KEY_EVENT) == 0) { return; }
 
+	// Handle multi-tap alpha events FIRST (exact equality: bare KEY_MOD_PREVIEW / KEY_MOD_PRESS
+	// without KEY_MOD_DOWN/KEY_MOD_UP) so characters like '#' from key '1' never trigger button handlers.
+	if (ev->keys.event == KEY_MOD_PREVIEW)
+	{
+		if (s_msg.composePos < dmrSmsMaxLen())
+		{
+			s_msg.compose[s_msg.composePos] = ev->keys.key;
+			s_msg.compose[s_msg.composePos + 1] = 0;
+			composeUpdate();
+		}
+		return;
+	}
+	if (ev->keys.event == KEY_MOD_PRESS)
+	{
+		if (s_msg.composePos < dmrSmsMaxLen())
+		{
+			s_msg.compose[s_msg.composePos] = ev->keys.key;
+			s_msg.compose[s_msg.composePos + 1] = 0;
+			s_msg.composePos++;
+			composeUpdate();
+		}
+		return;
+	}
+
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
 		gotoHome(); return;
@@ -423,15 +466,28 @@ static void composeEvent(uiEvent_t *ev)
 	{
 		if (strlen(s_msg.compose) == 0) { return; }
 		keypadAlphaEnable = false;
+		keyboardResetAlpha();
 		prefillRecipient();
 		s_msg.view = MSG_RECIPIENT;
 		recipientUpdate();
 		return;
 	}
-	if (KEYCHECK_SHORTUP(ev->keys, KEY_LEFT))
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_HASH))
+	{
+		keypadAlphaRussian = !keypadAlphaRussian;
+		keyboardResetAlpha();
+		composeUpdate();
+		return;
+	}
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_LEFT) || KEYCHECK_SHORTUP(ev->keys, KEY_DOWN))
 	{
 		int n = (int)strlen(s_msg.compose);
-		if (n > 0) { s_msg.compose[n - 1] = 0; if (s_msg.composePos > 0) s_msg.composePos--; }
+		if (n > 0)
+		{
+			s_msg.compose[n - 1] = 0;
+			s_msg.composePos = (int16_t)(n - 1);
+		}
+		keyboardResetAlpha();
 		composeUpdate();
 		return;
 	}
@@ -440,53 +496,41 @@ static void composeEvent(uiEvent_t *ev)
 		cyclePreset();
 		return;
 	}
-	// multi-tap alpha entry (keypadAlphaEnable handles cycling; same idiom as contact name)
-	if (s_msg.composePos < dmrSmsMaxLen())
-	{
-		if (ev->keys.event == KEY_MOD_PREVIEW)
-		{
-			s_msg.compose[s_msg.composePos] = ev->keys.key;
-			composeUpdate();
-			return;
-		}
-		if (ev->keys.event == KEY_MOD_PRESS)
-		{
-			s_msg.compose[s_msg.composePos] = ev->keys.key;
-			if (s_msg.composePos < (int)strlen(s_msg.compose) && s_msg.composePos < dmrSmsMaxLen() - 1)
-			{
-				s_msg.composePos++;
-			}
-			composeUpdate();
-			return;
-		}
-	}
 }
 
 /* ============================ RECIPIENT =============================== */
 static void recipientUpdate(void)
 {
-	char buf[24];
+	char buf[40];
 	displayClearBuf();
-	menuDisplayTitle("Recipient");
+	menuDisplayTitle((char *)TR("Recipient", "\317\356\353\363\367\340\362\345\353\374"));
 
-	snprintf(buf, sizeof buf, "To: %s", s_msg.rcpt);
+	snprintf(buf, sizeof buf, "%s: %s", TR("To", "\312\356\354\363"), s_msg.rcpt);
 	displayPrintAt(2, 28, buf, FONT_SIZE_3);
-	snprintf(buf, sizeof buf, "Type: %s", s_msg.rcptGroup ? "Group" : "Private");
+	snprintf(buf, sizeof buf, "%s: %s", currentLanguage->type,
+			s_msg.rcptGroup ? currentLanguage->group : currentLanguage->private);
 	displayPrintAt(2, 52, buf, FONT_SIZE_2);
 
-	displayPrintCentered(84,  "0-9:id  L:del", FONT_SIZE_1);
-	displayPrintCentered(96,  "U/D:Group/Private", FONT_SIZE_1);
-	displayPrintCentered(112, "GRN:send  RED:back", FONT_SIZE_1);
+	displayPrintCentered(84,  (char *)TR("0-9:id  L:del", "0-9:ID  \302\313\305\302\316:\363\344\340\353"), FONT_SIZE_1);
+	displayPrintCentered(96,  (char *)TR("U/D:Group/Private", "\302\302\305\320\325/\302\315\310\307:\303\360\363\357\357\340/\313\350\367\355"), FONT_SIZE_1);
+	displayPrintCentered(112, (char *)TR("GRN:send  RED:back", "\307\305\313:\356\362\357\360  \312\320\300\321\315:\355\340\347\340\344"), FONT_SIZE_1);
 	displayRender();
 }
 
 static void doSend(void)
 {
 	uint32_t dst = (uint32_t)strtoul(s_msg.rcpt, NULL, 10);
-	if (dst == 0) { return; }
+	if (dst == 0 || dst > 0x00FFFFFFu)
+	{
+		s_msg.result = -7;
+		s_msg.view = MSG_RESULT;
+		s_msg.resultTicks = 600;
+		resultUpdate();
+		return;
+	}
 	s_msg.result = (int8_t)dmrSmsSend(s_msg.compose, dst, s_msg.rcptGroup ? 1 : 0, 0);
 	s_msg.view = MSG_RESULT;
-	s_msg.resultTicks = 600;    // persist (~30 s) so the result/code is readable; any key dismisses
+	s_msg.resultTicks = 600;
 	resultUpdate();
 }
 
@@ -497,6 +541,8 @@ static void recipientEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
 		s_msg.view = MSG_COMPOSE;
+		s_msg.composePos = (int16_t)strlen(s_msg.compose);
+		keyboardResetAlpha();
 		keypadAlphaEnable = true;
 		composeUpdate();
 		return;
@@ -519,7 +565,7 @@ static void recipientEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP_NUMBER(ev->keys))
 	{
 		int n = (int)strlen(s_msg.rcpt);
-		if (n < (int)sizeof s_msg.rcpt - 1)
+		if (n < 8) // 24-bit DMR ID max is 16777215 (8 digits)
 		{
 			s_msg.rcpt[n] = (char)ev->keys.key;
 			s_msg.rcpt[n + 1] = 0;
@@ -533,29 +579,31 @@ static void recipientEvent(uiEvent_t *ev)
 static void resultUpdate(void)
 {
 	displayClearBuf();
-	menuDisplayTitle("Messages");
+	menuDisplayTitle((char *)currentLanguage->messages);
 	if (s_msg.result == 0)
 	{
-		displayPrintCentered(44, "Message sent", FONT_SIZE_3);
-		displayPrintCentered(72, "(keyed TX)", FONT_SIZE_2);
+		displayPrintCentered(44, (char *)TR("Message sent", "\316\362\357\360\340\342\353\345\355\356!"), FONT_SIZE_3);
+		displayPrintCentered(72, (char *)TR("(keyed TX)", "(\357\345\360\345\344\340\367\340 \342 \375\364\350\360)"), FONT_SIZE_2);
 	}
 	else
 	{
 		char buf[24];
-		const char *why = "error";
+		const char *why = TR("error", "\356\370\350\341\352\340");
 		switch (s_msg.result)
 		{
-			case -2: why = "TX busy";   break;
-			case -3: why = "no key";    break;
-			case -1: why = "bad text";  break;
-			case -4: case -5: why = "too long"; break;
-			case -6: why = "TX blocked"; break;
+			case -2: why = TR("TX busy",    "TX \347\340\355\377\362");    break;
+			case -3: why = TR("no key",     "\355\345\362 \352\353\376\367\340");   break;
+			case -1: why = TR("bad text",   "\356\370. \362\345\352\361\362\340");  break;
+			case -4:
+			case -5: why = TR("too long",   "\361\353\350\370\352\356\354 \344\353."); break;
+			case -6: why = TR("TX blocked", "\347\340\357\360\345\362 TX");   break;
+			case -7: why = TR("bad ID",     "\355\345\342\345\360\355. ID");  break;
 		}
-		displayPrintCentered(44, "Send failed", FONT_SIZE_3);
+		displayPrintCentered(44, (char *)TR("Send failed", "\316\370\350\341\352\340 \356\362\357\360."), FONT_SIZE_3);
 		snprintf(buf, sizeof buf, "%s (ret %d)", why, s_msg.result);
 		displayPrintCentered(72, buf, FONT_SIZE_2);
 	}
-	displayPrintCentered(112, "any key: back", FONT_SIZE_1);
+	displayPrintCentered(112, (char *)TR("any key: back", "\353\376\341\340\377 \352\355.: \355\340\347\340\344"), FONT_SIZE_1);
 	displayRender();
 }
 

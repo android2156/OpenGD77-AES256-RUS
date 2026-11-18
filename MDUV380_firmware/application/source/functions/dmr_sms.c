@@ -350,6 +350,52 @@ typedef struct
 static dmrSmsCfg_t s_cfg DMR_AES_CCM;
 static uint8_t     s_cfgLoaded DMR_AES_CCM;
 
+static void utf8_to_cp1251_inplace(char *s, int maxLen)
+{
+	uint8_t *p = (uint8_t *)s;
+	int has_utf8_pair = 0, has_raw_hi = 0;
+	for (int i = 0; i < maxLen && p[i] != 0; i++)
+	{
+		if ((p[i] == 0xD0 || p[i] == 0xD1) && (i + 1 < maxLen) && (p[i + 1] >= 0x80 && p[i + 1] <= 0xBF))
+		{
+			has_utf8_pair = 1;
+			i++;
+		}
+		else if (p[i] == 0xC2 && (i + 1 < maxLen) && p[i + 1] == 0xB0)
+		{
+			has_utf8_pair = 1;
+			i++;
+		}
+		else if (p[i] >= 0x80)
+		{
+			has_raw_hi = 1;
+		}
+	}
+	if (!has_utf8_pair || has_raw_hi) { return; }
+	int w = 0;
+	for (int r = 0; r < maxLen && p[r] != 0; r++)
+	{
+		if (p[r] == 0xD0 && (r + 1 < maxLen))
+		{
+			uint8_t b2 = p[r + 1];
+			if (b2 == 0x81) { p[w++] = 0xA8; r++; continue; }
+			if (b2 >= 0x90 && b2 <= 0xBF) { p[w++] = (uint8_t)(b2 + 0x30); r++; continue; }
+		}
+		else if (p[r] == 0xD1 && (r + 1 < maxLen))
+		{
+			uint8_t b2 = p[r + 1];
+			if (b2 == 0x91) { p[w++] = 0xB8; r++; continue; }
+			if (b2 >= 0x80 && b2 <= 0x8F) { p[w++] = (uint8_t)(b2 + 0x70); r++; continue; }
+		}
+		else if (p[r] == 0xC2 && (r + 1 < maxLen) && p[r + 1] == 0xB0)
+		{
+			p[w++] = 0xB0; r++; continue;
+		}
+		p[w++] = p[r];
+	}
+	while (w < maxLen) { p[w++] = 0; }
+}
+
 static void cfg_load(void)
 {
 	s_cfgLoaded = 1;
@@ -361,7 +407,7 @@ static void cfg_load(void)
 		/* Force-terminate every preset row: dmrSmsPresetGet() returns these as C strings
 		 * and the compose copy reads up to dmrSmsMaxLen() (144) chars, so an unterminated
 		 * 48-byte row written by CHIRP must not run into the next row / off the struct. */
-		for (int i = 0; i < DMR_SMS_NUM_PRESETS; i++) { s_cfg.preset[i][MSGC_PRESET_LEN - 1] = 0; }
+		for (int i = 0; i < DMR_SMS_NUM_PRESETS; i++) { s_cfg.preset[i][MSGC_PRESET_LEN - 1] = 0; utf8_to_cp1251_inplace(s_cfg.preset[i], MSGC_PRESET_LEN); }
 		return;
 	}
 	memset(&s_cfg, 0, sizeof s_cfg);
@@ -504,7 +550,16 @@ static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t ds
 	tms[ti++] = 0xA0; tms[ti++] = 0x00; tms[ti++] = seq; tms[ti++] = 0x04;
 	tms[ti++] = 0x0D; tms[ti++] = 0x00;   /* fixed CRLF header (stock uses 0d/0a here, NOT L+3/L) */
 	tms[ti++] = 0x0A; tms[ti++] = 0x00;
-	for (int i = 0; i < tlen; i++) { tms[ti++] = (uint8_t)text[i]; tms[ti++] = 0x00; }
+	for (int i = 0; i < tlen; i++)
+	{
+		uint8_t c = (uint8_t)text[i];
+		uint16_t u = c;
+		if (c >= 0xC0)      { u = (uint16_t)(0x0410 + (c - 0xC0)); }
+		else if (c == 0xA8) { u = 0x0401; }
+		else if (c == 0xB8) { u = 0x0451; }
+		tms[ti++] = (uint8_t)(u & 0xFF);
+		tms[ti++] = (uint8_t)(u >> 8);
+	}
 
 	int udpLen = 8 + ti;
 	/* MotoTRBO CAI IP = prefix.<id[23:16]>.<id[15:8]>.<id[7:0]> — the FULL 24-bit DMR ID/TG.
@@ -852,6 +907,16 @@ static int tytTextDecode(const uint8_t *p, int len, char *out, int outMax)
 
 /* Text from a short data payload in its DD format. Returns the characters written (ASCII,
  * others become '?'), 0 or less when nothing readable is in it. */
+static uint8_t unicode_to_cp1251(uint32_t cp)
+{
+	if (cp >= 0x20 && cp < 0x7F)     { return (uint8_t)cp; }
+	if (cp >= 0x0410 && cp <= 0x044F) { return (uint8_t)(0xC0 + (cp - 0x0410)); }
+	if (cp == 0x0401)                { return 0xA8; }
+	if (cp == 0x0451)                { return 0xB8; }
+	if (cp == 0x00B0)                { return 0xB0; }
+	return 0;
+}
+
 static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int outMax)
 {
 	int n = 0, printable = 0;
@@ -860,17 +925,43 @@ static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int o
 	int step = ((fmt >= 0x16) && (fmt <= 0x18)) ? 4 : (wide ? 2 : 1);
 
 	if ((len <= 0) || (outMax <= 1)) { return -1; }
-	if ((fmt == 0x00) || (fmt == 0x01) || ((fmt >= 0x08) && (fmt <= 0x09))) { return -1; }   /* binary, BCD, manufacturer specific */
+	if ((fmt == 0x00) || (fmt == 0x01) || ((fmt >= 0x08) && (fmt <= 0x09))) { return -1; }
 	for (int i = 0; (i + step - 1) < len && n < outMax - 1; i += step)
 	{
-		uint32_t cp;
-		if (step == 1)      { cp = p[i]; }
+		uint32_t cp = 0;
+		if (step == 1)
+		{
+			uint8_t b1 = p[i];
+			if ((b1 == 0xD0 || b1 == 0xD1) && (i + 1 < len) && (p[i + 1] >= 0x80 && p[i + 1] <= 0xBF))
+			{
+				uint8_t b2 = p[i + 1];
+				if (b1 == 0xD0 && b2 == 0x81) { cp = 0x0401; i++; }
+				else if (b1 == 0xD0 && b2 >= 0x90 && b2 <= 0xBF) { cp = 0x0410 + (b2 - 0x90); i++; }
+				else if (b1 == 0xD1 && b2 == 0x91) { cp = 0x0451; i++; }
+				else if (b1 == 0xD1 && b2 >= 0x80 && b2 <= 0x8F) { cp = 0x0440 + (b2 - 0x80); i++; }
+				else { cp = 0xFFFD; i++; }
+			}
+			else if (b1 == 0xC2 && (i + 1 < len) && p[i + 1] == 0xB0)
+			{
+				cp = 0x00B0; i++;
+			}
+			else if (fmt != 0x12 && fmt != 0x03 && (b1 == 0xA8 || b1 == 0xB8 || b1 >= 0xC0))
+			{
+				/* Raw 8-bit CP1251 in non-UTF8 short data */
+				out[n++] = (char)b1; printable++; continue;
+			}
+			else
+			{
+				cp = b1;
+			}
+		}
 		else if (step == 2) { cp = le ? (uint32_t)(p[i] | (p[i + 1] << 8)) : (uint32_t)((p[i] << 8) | p[i + 1]); }
 		else                { cp = le ? ((uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) | ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24))
 		                               : (((uint32_t)p[i] << 24) | ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | (uint32_t)p[i + 3]); }
 		if (cp == 0) { break; }
 		if ((cp == 0x0A) || (cp == 0x0D) || (cp == 0x09)) { out[n++] = ' '; continue; }
-		if ((cp >= 0x20) && (cp < 0x7F)) { out[n++] = (char)cp; printable++; }
+		uint8_t c1251 = unicode_to_cp1251(cp);
+		if (c1251 != 0) { out[n++] = (char)c1251; printable++; }
 		else { out[n++] = '?'; }
 	}
 	out[n] = 0;

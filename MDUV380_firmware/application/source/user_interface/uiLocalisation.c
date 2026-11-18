@@ -29,6 +29,9 @@
 #include "user_interface/uiLocalisation.h"
 
 #include "user_interface/languages/english.h"
+#if ! defined(LANGUAGE_BUILD_JAPANESE)
+#include "user_interface/languages/russian.h"
+#endif
 #if defined(LANGUAGE_BUILD_JAPANESE)
 #include "user_interface/languages/japanese.h"
 #endif
@@ -55,7 +58,7 @@ const stringsTable_t languages[]=
 #if defined(LANGUAGE_BUILD_JAPANESE)
 		japaneseLanguage       // japaneseLanguageName
 #else
-		userLanguage // User language, written by the CPS
+		russianLanguage // Built-in Russian language
 #endif
 };
 const stringsTable_t *currentLanguage;

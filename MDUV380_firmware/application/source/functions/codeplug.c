@@ -253,27 +253,111 @@ uint16_t codeplugIntToCSS(uint16_t tone)
 
 void codeplugUtilConvertBufToString(char *codeplugBuf, char *outBuf, int len)
 {
-	for(int i = 0; i < len; i++)
+	uint8_t src[32];
+	int safeLen = (len > 0 && len <= (int)sizeof(src)) ? len : (int)sizeof(src);
+	int has_utf8 = 0, has_invalid_utf8 = 0;
+
+	/* Copy raw bytes and preserve original side-effect: replace all 0xFF in codeplugBuf with 0 */
+	for (int i = 0; i < safeLen; i++)
 	{
-		if (codeplugBuf[i] == 0xff)
+		uint8_t b = (uint8_t)codeplugBuf[i];
+		src[i] = b;
+		if (b == 0xFF)
 		{
 			codeplugBuf[i] = 0;
 		}
-		outBuf[i] = codeplugBuf[i];
 	}
-	outBuf[len] = 0;
+
+	/* Detect whether the field is UTF-8 (from CPS) vs legacy 1-byte CP1251 */
+	for (int i = 0; i < safeLen && src[i] != 0xFF && src[i] != 0x00; i++)
+	{
+		uint8_t b1 = src[i];
+		if (b1 < 0x80) { continue; }
+		if ((b1 == 0xD0 || b1 == 0xD1) && (i + 1 < safeLen) && (src[i + 1] >= 0x80 && src[i + 1] <= 0xBF))
+		{
+			has_utf8 = 1; i++; continue;
+		}
+		if (b1 == 0xC2 && (i + 1 < safeLen) && src[i + 1] == 0xB0)
+		{
+			has_utf8 = 1; i++; continue;
+		}
+		if ((b1 == 0xD0 || b1 == 0xD1 || b1 == 0xC2) && (i + 1 == safeLen || src[i + 1] == 0xFF || src[i + 1] == 0x00))
+		{
+			/* Truncated trailing UTF-8 lead byte at boundary */
+			break;
+		}
+		has_invalid_utf8 = 1;
+	}
+
+	int w = 0;
+	for (int i = 0; i < safeLen; i++)
+	{
+		uint8_t b1 = src[i];
+		if (b1 == 0xFF || b1 == 0x00)
+		{
+			break;
+		}
+		if (has_utf8 && !has_invalid_utf8)
+		{
+			if (b1 == 0xD0 || b1 == 0xD1)
+			{
+				if ((i + 1 < safeLen) && (src[i + 1] >= 0x80) && (src[i + 1] <= 0xBF))
+				{
+					uint8_t b2 = src[i + 1];
+					if (b1 == 0xD0 && b2 == 0x81) { outBuf[w++] = (char)0xA8; i++; continue; }
+					if (b1 == 0xD0 && b2 >= 0x90 && b2 <= 0xBF) { outBuf[w++] = (char)(b2 + 0x30); i++; continue; }
+					if (b1 == 0xD1 && b2 == 0x91) { outBuf[w++] = (char)0xB8; i++; continue; }
+					if (b1 == 0xD1 && b2 >= 0x80 && b2 <= 0x8F) { outBuf[w++] = (char)(b2 + 0x70); i++; continue; }
+				}
+				else if ((i + 1 >= safeLen) || (src[i + 1] == 0xFF) || (src[i + 1] == 0x00))
+				{
+					/* Drop truncated trailing UTF-8 lead byte at the 16-byte codeplug boundary */
+					break;
+				}
+			}
+			else if ((b1 == 0xC2) && (i + 1 < safeLen) && (src[i + 1] == 0xB0))
+			{
+				outBuf[w++] = (char)0xB0;
+				i++;
+				continue;
+			}
+		}
+		outBuf[w++] = (char)b1;
+	}
+	outBuf[w] = 0;
 }
 
 void codeplugUtilConvertStringToBuf(char *inBuf, char *outBuf, int len)
 {
-	memset(outBuf,0xff,len);
-	for (int i = 0; i < len; i++)
+	/* Copy input to stack first so inBuf == outBuf (in-place call) is 100% safe */
+	uint8_t tmp[32];
+	int safeLen = (len > 0 && len < (int)sizeof(tmp)) ? len : ((int)sizeof(tmp) - 1);
+	int inLen = 0;
+	while (inLen < safeLen && inBuf[inLen] != 0)
 	{
-		if (inBuf[i] == 0x00)
+		tmp[inLen] = (uint8_t)inBuf[inLen];
+		inLen++;
+	}
+	tmp[inLen] = 0;
+
+	memset(outBuf, 0xff, len);
+	int w = 0;
+	for (int i = 0; i < inLen && w < len; i++)
+	{
+		uint8_t c = tmp[i];
+		if (c == 0xA8 || c == 0xB8 || c >= 0xC0 || c == 0xB0)
 		{
-			break;
+			if (w + 2 > len) { break; }
+			if (c == 0xA8)      { outBuf[w++] = (char)0xD0; outBuf[w++] = (char)0x81; }
+			else if (c == 0xB8) { outBuf[w++] = (char)0xD1; outBuf[w++] = (char)0x91; }
+			else if (c == 0xB0) { outBuf[w++] = (char)0xC2; outBuf[w++] = (char)0xB0; }
+			else if (c <= 0xEF) { outBuf[w++] = (char)0xD0; outBuf[w++] = (char)(c - 0x30); }
+			else                { outBuf[w++] = (char)0xD1; outBuf[w++] = (char)(c - 0x70); }
 		}
-		outBuf[i] = inBuf[i];
+		else
+		{
+			outBuf[w++] = (char)c;
+		}
 	}
 }
 

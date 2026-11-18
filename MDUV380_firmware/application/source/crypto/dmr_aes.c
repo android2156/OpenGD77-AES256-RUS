@@ -513,18 +513,46 @@ void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]) {
 /* Extract the UTF-16LE message text from an already-PLAINTEXT IPv4/UDP/TMS SMS PDU
  * (the cleartext path uses this directly; the decrypt path calls it after ECB-decrypting).
  * Text runs from byte 38 to the IP total-length end. Returns text len, or -1 if not IPv4/UDP. */
+static uint8_t aes_utf16_to_cp1251(uint16_t u) {
+    if (u >= 0x0020 && u <= 0x007E) return (uint8_t)u;
+    if (u >= 0x0410 && u <= 0x044F) return (uint8_t)(0xC0 + (u - 0x0410));
+    if (u == 0x0401) return 0xA8;
+    if (u == 0x0451) return 0xB8;
+    if (u == 0x00B0) return 0xB0;
+    if (u == 0x000A || u == 0x000D || u == 0x0009) return ' ';
+    return 0;
+}
+
 int dmr_sms_text_from_plaintext(const uint8_t *pdu, int pdu_len, char *out, int out_max) {
-    int i, n = 0, iptot, tend;
-    if (pdu_len < 32 || out_max <= 0) return -1;
+    int i, n = 0, printable = 0, iptot, udp_len, tend, ihl, text_off;
+    int le_hits = 0, be_hits = 0, use_be = 0;
+    if (pdu_len < 38 || out_max <= 1) return -1;
     if ((pdu[0] >> 4) != 4 || pdu[9] != 0x11) return -1;   /* not IPv4/UDP */
+    ihl = (pdu[0] & 0x0F) * 4;
+    if (ihl < 20 || pdu_len < ihl + 18) return -1;
+    text_off = ihl + 18;                                   /* UDP(8) + TMS hdr(10) */
     iptot = ((int)pdu[2] << 8) | pdu[3];                   /* IP packet length */
-    if (iptot > pdu_len) { iptot = pdu_len; }
-    tend = iptot;                                          /* text runs [38, IP packet end) */
-    for (i = 38; i + 1 < tend && n < out_max - 1; i += 2) {
-        if (pdu[i+1] == 0 && pdu[i] >= 0x20 && pdu[i] < 0x7f) out[n++] = (char)pdu[i];
+    udp_len = ((int)pdu[ihl + 4] << 8) | pdu[ihl + 5];     /* UDP header length */
+    if (iptot < text_off || udp_len != (iptot - ihl)) return -1; /* reject wrong-key garbage */
+    tend = (iptot > pdu_len) ? pdu_len : iptot;            /* clamp if truncated on weak RF */
+    for (i = text_off; i + 1 < tend; i += 2) {
+        uint16_t u_le = (uint16_t)pdu[i] | ((uint16_t)pdu[i + 1] << 8);
+        uint16_t u_be = ((uint16_t)pdu[i] << 8) | (uint16_t)pdu[i + 1];
+        if (u_le == 0 && u_be == 0) break;
+        if (aes_utf16_to_cp1251(u_le) != 0) le_hits++;
+        if (aes_utf16_to_cp1251(u_be) != 0) be_hits++;
+    }
+    use_be = (be_hits > le_hits) ? 1 : 0;
+    for (i = text_off; i + 1 < tend && n < out_max - 1; i += 2) {
+        uint16_t u = use_be ? (((uint16_t)pdu[i] << 8) | (uint16_t)pdu[i + 1])
+                            : ((uint16_t)pdu[i] | ((uint16_t)pdu[i + 1] << 8));
+        if (u == 0) break;
+        uint8_t c = aes_utf16_to_cp1251(u);
+        if (c != 0) { out[n++] = (char)c; printable++; }
+        else        { out[n++] = '?'; }
     }
     out[n] = 0;
-    return n;
+    return (printable > 0) ? n : -1;
 }
 
 int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],

@@ -270,7 +270,8 @@ int displayPrintCoreDoubleHeight(int16_t xPos, int16_t yPos, const char *szMsg, 
 			continue;
 		}
 
-		uint32_t charOffset = (szMsg[i] - startCode);
+		uint8_t ch = (uint8_t)szMsg[i];
+		uint32_t charOffset = (ch >= startCode) ? (uint32_t)(ch - startCode) : (uint32_t)('?' - startCode);
 
 		// End boundary checking.
 		if (charOffset > endCode)

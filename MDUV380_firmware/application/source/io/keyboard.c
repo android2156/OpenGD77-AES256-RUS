@@ -99,8 +99,19 @@ enum KEY_STATE
 };
 
 
-static const char keypadAlphaMap[11][31] = {
-		"0 ",
+volatile bool keypadAlphaRussian = false;
+
+void keyboardResetAlpha(void)
+{
+	taskENTER_CRITICAL();
+	timer_keypad_timeout = 0;
+	keypadAlphaKey = 0;
+	keypadAlphaIndex = 0;
+	taskEXIT_CRITICAL();
+}
+
+static const char keypadAlphaMapEng[11][31] = {
+		" 0",
 		"1.!,@-:?()~/[]#<>=*+$%'`&|_^{}",
 		"abc2ABC",
 		"def3DEF",
@@ -112,6 +123,21 @@ static const char keypadAlphaMap[11][31] = {
 		"wxyz9WXYZ",
 		"*"
 };
+
+static const char keypadAlphaMapRus[11][31] = {
+		" 0",
+		"1.!,@-:?()~/[]#<>=*+$%'`&|_^{}",
+		"\340\341\342\3432\300\301\302\303", // абвг2АБВГ
+		"\344\345\270\346\3473\304\305\250\306\307", // деёжз3ДЕЁЖЗ
+		"\350\351\352\3534\310\311\312\313", // ийкл4ИЙКЛ
+		"\354\355\356\3575\314\315\316\317", // мноп5МНОП
+		"\360\361\362\3636\320\321\322\323", // рсту6РСТУ
+		"\364\365\366\3677\324\325\326\327", // фхцч7ФХЦЧ
+		"\370\371\372\3738\330\331\332\333", // шщъы8ШЩЪЫ
+		"\374\375\376\3779\334\335\336\337", // ьэюя9ЬЭЮЯ
+		"*"
+};
+#define keypadAlphaMap (keypadAlphaRussian ? keypadAlphaMapRus : keypadAlphaMapEng)
 
 #define KEYBOARD_KEYS_PER_ROW  8U
 
@@ -266,6 +292,7 @@ void keyboardInit(void)
 	keyDebounceScancode = 0;
 	keyDebounceCounter = 0;
 	keypadAlphaEnable = false;
+	keypadAlphaRussian = false;
 	keypadAlphaIndex = 0;
 	keypadAlphaKey = 0;
 	keyState = KEY_IDLE;
@@ -279,6 +306,7 @@ void keyboardReset(void)
 {
 	oldKeyboardCode = 0;
 	keypadAlphaEnable = false;
+	keypadAlphaRussian = false;
 	keypadAlphaIndex = 0;
 	keypadAlphaKey = 0;
 	keyState = KEY_WAIT_RELEASED;
@@ -569,6 +597,10 @@ void keyboardCheckKeyEvent(keyboardCode_t *keys, int *event)
 			}
 			break;
 		case KEY_PRESS:
+			if (keycode == 0 && keypadAlphaEnable && keypadAlphaKey != 0)
+			{
+				keycode = oldKeyboardCode;
+			}
 			keys->key = keycode;
 			keys->event = KEY_MOD_DOWN | KEY_MOD_PRESS;
 			*event = EVENT_KEY_CHANGE;
@@ -620,7 +652,7 @@ void keyboardCheckKeyEvent(keyboardCode_t *keys, int *event)
 					}
 					else
 					{
-						keys->key = keypadAlphaMap[keypadAlphaKey - 1][keypadAlphaIndex];
+						keys->key = keypadAlphaMap[keypadAlphaKey - 1][(keypadAlphaIndex < 0) ? 0 : keypadAlphaIndex];
 						keys->event = KEY_MOD_PRESS;
 						*event = EVENT_KEY_CHANGE;
 						keypadAlphaKey = newAlphaKey;
