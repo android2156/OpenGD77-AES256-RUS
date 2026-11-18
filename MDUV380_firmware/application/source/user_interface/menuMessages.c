@@ -24,7 +24,7 @@ extern const stringsTable_t russianLanguage;
 static inline bool isRussianUI(void)
 {
 #if ! defined(LANGUAGE_BUILD_JAPANESE)
-	return (currentLanguage == &russianLanguage);
+	return (currentLanguage == &languages[1]);
 #else
 	return false;
 #endif
