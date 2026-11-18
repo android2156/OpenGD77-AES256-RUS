@@ -1,81 +1,21 @@
-# OpenGD77-AES256 (TYT MD-UV390 Plus, 10W)
+## Русская модификация (RU + DMR SMS + 106 DCS)
 
-An experimental fork of [OpenGD77](https://opengd77.com) for the **TYT MD-UV390 Plus (10W)** that adds
-**TYT-compatible DMRA AES-256 encrypted voice** — interoperable with the stock TYT "Universal" AES256
-firmware. Stock OpenGD77 has no encryption; this is a reverse-engineering / interop project, not an
-upstream feature.
+Форк [`dondch/OpenGD77-AES256`](https://github.com/dondch/OpenGD77-AES256) с полной поддержкой русского языка и расширенной таблицей субтонов для **TYT MD-UV380 / MD-UV390 Plus 10W** (`PROFILE=full`).
 
-It is built on the official OpenGD77 source release **R20260131**, target `MDUV380_10W_PLUS_FW`
-(`PLATFORM_MDUV380` + `PLATFORM_VARIANT_UV380_PLUS_10W`). All the normal OpenGD77 functionality
-(DMR/FM transmit + receive, hotspot, etc.) is unchanged. AES-256 is always compiled in: every build of
-this fork is an AES build.
+### Основные изменения
+* **Русификация интерфейса (`English` ↔ `Русский`):** встроенная кириллица (`Windows-1251`, включая `Ё/ё`) во всех 5 шрифтах дисплея. Переключение языка в `Menu → Options → Language` работает без загрузки языковых пакетов через CPS.
+* **Русские DMR SMS и клавиатура:**
+  * Приём и передача русских SMS в стандартных кодировках `UTF-16LE` / `UTF-16BE` / `UTF-8` (совместимо со штатными TYT, Motorola и BrandMeister).
+  * Русская раскладка на кнопках `2–9` (первое нажатие на `0` — пробел, второе — `0`), переключение раскладки `[РУС]` ↔ `[ENG]` по кнопке `#`, удаление символа — валкодером влево или кнопкой `Вниз`.
+  * Переведённый интерфейс меню `Сообщения` и ограничение ввода получателя 24-битным DMR ID.
+* **106 кодов DCS:** таблица аналоговых субтонов расширена с 83 до 106 кодов (добавлены `D446N`, `D255I`, `D645N` и др. с точными битами чётности Golay{23,12}).
 
-## ⚠️ Legal
+### Прошивка
+Готовый бинарник (`openuv380-10w-RU-106DCS.bin`) доступен во вкладке **[Releases](https://github.com/android2156/OpenGD77-AES256/releases)**. Прошивается штатно через **OpenGD77 CPS** с донорским файлом `MD9600-CSV(2571V5)-V26.45.bin` (для работы DMR).
 
-AES-256 encrypted voice is **illegal on amateur radio bands in most countries**; it is only valid on
-licensed commercial / PMR allocations. Use this only where you are licensed to transmit encrypted
-voice. The source and binaries are also **non-commercial use only** — see [`license.txt`](license.txt).
+### Известные ограничения
+* **Названия каналов, зон и контактов** в OpenGD77 CPS рекомендуется задавать латиницей — сам CPS при записи кодплага перекодирует кириллицу в нестандартный формат.
+* Кириллические глифы размещены на месте западноевропейской таблицы `Latin-1` (`192–255`), а слот пользовательского языка занят встроенным русским языком (`English` ↔ `Русский`).
+* Кириллические шрифты добавлены для экранов `HX8353E` (линейка `MD-UV380` / `MD-UV390` / `DM-1701`), сборка для `RD-5R` не тестировалась.
 
-## What it adds
-
-Implements the standardized **DMR Association AES-256** scheme (Motorola/Hytera-compatible, ETSI TS
-102 361) that the MD-UV390 Plus "Universal" mode uses, so this firmware and a stock TYT radio can
-encrypt/decrypt each other:
-
-- **AES-256 in OFB mode**, the keystream XORed onto the decoded 49-bit AMBE voice parameters.
-- A 32-bit **Message Indicator (MI)** carried in the PI header, expanded to a 128-bit IV by an LFSR
-  (`dmr_lfsr128d`) and advanced one step per superframe.
-- The MI also conveyed **in-band in the AMBE codeword bits** (Late-Entry MI, Golay(24,12)+CRC4), with
-  the call announced over the air via the encrypted-call LC (FID `0x10` / SO `0x40`) and the burst-F
-  EMB **Late-Entry Single Block** (alg/key).
-
-### Status — working on hardware
-
-Validated on real MD-UV390 10W Plus radios, cross-checked with HackRF captures + DSD-FME.
-
-- **TX:** a bone-stock TYT MD-UV390 decodes this firmware's encrypted transmissions to clear voice —
-  full interoperable signalling (keystream + Late-Entry MI + encrypted-call LC + EMB Single Block +
-  PI-Header preamble).
-- **RX:** decrypts a stock TYT's AES-256 voice to clear audio, including **rapid back-to-back calls**
-  (the receiver locks the new call's MI directly from the in-band Late-Entry, like a stock receiver).
-- **Keys:** stored persistently in the SPI-flash custom-data region (survive reboots and firmware
-  flashes), loaded via a host tool over the OpenGD77 CPS USB protocol.
-
-## Build & flash
-
-See **[BUILD.md](BUILD.md)** for the full toolchain, the required AMBE codec donor (MD-9600 V5), and
-DFU flashing. In short:
-
-```sh
-cd MDUV380_firmware
-make -j$(nproc)
-python3 tools/opengd77_stm32_firmware_loader.py -s <MD9600-V5-donor.bin> \
-        -f build/openuv380-10w.bin -m MD-UV380
-```
-
-DMR needs the proprietary AMBE+2 vocoder, which is **not** present in this (or any OpenGD77)
-source/binary; the loader merges it from an **MD-9600 V5** donor at flash time (see BUILD.md).
-**Do not flash a 5W build to a 10W radio.**
-
-### Optional features and diagnostics
-
-Everything beyond AES voice is behind an off-by-default build flag: encrypted SMS, fast analog scan, the dual
-screen and the TA2TWC screens as features, plus the bench and AES diagnostics. The flags, their measured RAM
-cost and the named build profiles (`make PROFILE=full`, `make PROFILE=dev-aes`, ...) are documented in
-[BUILD.md, "Build flags"](BUILD.md#build-flags).
-
-## License
-
-This fork inherits the OpenGD77 license — **BSD-3-clause style with a non-commercial clause**. The full
-text is in [`license.txt`](license.txt); commercial use of the source or binaries is forbidden. All
-upstream source files and copyright headers are preserved.
-
-## Credits
-
-OpenGD77 was conceived by Kai DG4KLU and developed by Roger Clark VK3KYY, latterly assisted by Daniel
-F1RMB, Alex DL4LEX, Colin G4EML and many others (lead developer / source gatekeeper: Roger VK3KYY) —
-see the upstream project for the full contributor list. This fork only adds the DMRA AES-256 layer on
-top of their work. The DMRA AES scheme reference implementation is
-[DSD-FME](https://github.com/lwvmobile/dsd-fme) by lwvmobile.
-
-User guide (general OpenGD77 operation): https://github.com/LibreDMR/OpenGD77_UserGuide
+---
